@@ -3,6 +3,7 @@
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
+from torch.nn import functional as F
 
 # VectorQuantization from: https://github.com/JACKHAHA363/VQVAE/blob/master/model.py
 class VectorQuantization(torch.autograd.Function):
@@ -58,7 +59,7 @@ class VectorQuantization(torch.autograd.Function):
 
 
 class VQVAE(nn.Module):
-    def __init__(self, input_dim, embed_dim, embed_num):
+    def __init__(self, input_dim, embed_dim, embed_num, batch_size):
         super(VQVAE, self).__init__()
 
         self.fc1 = nn.Linear(784, 400)
@@ -72,6 +73,8 @@ class VQVAE(nn.Module):
         self.sigmoid = nn.Sigmoid()
 
         self.embed = nn.Embedding(embed_num, embed_dim)
+
+        self.batch_size = batch_size
 
     def encode(self, x):
         h1 = self.relu(self.fc1(x))
@@ -90,7 +93,21 @@ class VQVAE(nn.Module):
         self.z_e = self.encode(x.view(-1, 784))
         self.z_q = self.vq(self.z_e)
         self.x_reconst = self.decode(self.z_q)
-        return self.x_reconst
+
+        # reconstruction loss
+        reconst_loss = F.binary_cross_entropy(self.x_reconst, x)
+        # embedding loss
+        detach_z_e = Variable(self.z_e.data, requires_grad=False)
+        #z_q = model.vq(detach_z_e)
+        z_q = self.z_q
+        embed_loss= torch.sum((detach_z_e - z_q).pow(2))
+        embed_loss /= self.batch_size
+        # commitment loss
+        detach_z_q = Variable(self.z_q.data, requires_grad=False)
+        commit_loss = torch.sum((self.z_e - detach_z_q).pow(2))
+        commit_loss /= self.batch_size
+
+        return self.x_reconst, reconst_loss, embed_loss, commit_loss
 
     def get_embed_weight(self):
         return self.embed.weight

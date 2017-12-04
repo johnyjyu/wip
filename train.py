@@ -7,7 +7,6 @@ import torch
 import torch.utils.data
 from torch import nn, optim
 from torch.autograd import Variable
-from torch.nn import functional as F
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
 from model import VQVAE
@@ -48,26 +47,9 @@ test_loader = torch.utils.data.DataLoader(
     batch_size=args.batch_size, shuffle=True, **kwargs)
 
 
-model = VQVAE(args.input_dim, args.emb_dim, args.emb_num)
+model = VQVAE(args.input_dim, args.emb_dim, args.emb_num, args.batch_size)
 if args.cuda:
     model.cuda()
-
-
-def get_losses(recon_x, x, model):
-    # reconstruction loss
-    reconst_loss = F.binary_cross_entropy(recon_x, x)
-    # embedding loss
-    detach_z_e = Variable(model.z_e.data, requires_grad=False)
-    #z_q = model.vq(detach_z_e)
-    z_q = model.z_q
-    embed_loss= torch.sum((detach_z_e - z_q).pow(2))
-    embed_loss /= args.batch_size
-    # commitment loss
-    detach_z_q = Variable(model.z_q.data, requires_grad=False)
-    commit_loss = torch.sum((model.z_e - detach_z_q).pow(2))
-    commit_loss /= args.batch_size
-
-    return reconst_loss, embed_loss, commit_loss
 
 
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -82,10 +64,9 @@ def train(epoch):
         if args.cuda:
             data = data.cuda()
         # run forward
-        recon_batch = model(data)
-
         # compute losses
-        reconst_loss, embed_loss, commit_loss = get_losses(recon_batch, data, model)
+        recon_batch, reconst_loss, embed_loss, commit_loss = model(data)
+
         # clear gradients and run backward
         optimizer.zero_grad()
         # get gradients for decoder and encoder
@@ -124,8 +105,7 @@ def test(epoch):
         if args.cuda:
             data = data.cuda()
         data = Variable(data, volatile=True).view(-1, 784)
-        recon_batch = model(data)
-        reconst_loss, embed_loss, commit_loss = get_losses(recon_batch, data, model)
+        recon_batch, reconst_loss, embed_loss, commit_loss = model(data)
         test_loss += (reconst_loss + embed_loss + args.beta*commit_loss).data[0]
         
         if i == 0:
