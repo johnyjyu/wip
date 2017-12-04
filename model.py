@@ -13,12 +13,25 @@ class VectorQuantization(torch.autograd.Function):
         emb: (emb_num, D)
         output: (bz, D)
         """
-        dist = row_wise_distance(x, emb)
+        """
+        v1: (a, p)
+        v2: (b, p)
+        dist: (a, b), where dist[i,j] = l2_dist(m1[i], m2[j])
+        """
+        a = x.size(0)
+        b = emb.size(0)
+        v1 = torch.stack([x]*b).transpose(0,1)
+        v2 = torch.stack([emb]*a)
+        dist = torch.sum((v1-v2)**2, 2).squeeze()
         indices = torch.min(dist, -1)[1]
         ctx.indices = indices
         ctx.emb_num = emb.size(0)
         ctx.bz = x.size(0)
-        return torch.index_select(emb, 0, indices)
+
+        #self.save_for_backward(x)
+        result = torch.index_select(emb, 0, indices)
+        ctx.save_for_backward(result)
+        return result
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -27,32 +40,33 @@ class VectorQuantization(torch.autograd.Function):
         emb_num = ctx.emb_num
         # get an one hot index
         one_hot_ind = torch.zeros(bz, emb_num)
+        if torch.cuda.is_available:
+            one_hot_ind = one_hot_ind.cuda()
         one_hot_ind.scatter_(1, indices, 1)
         one_hot_ind = Variable(one_hot_ind, requires_grad=False)
-        grad_emb = torch.mm(one_hot_ind.t(), grad_output)
-        return grad_output, grad_emb
 
-def row_wise_distance(v1, v2):
-    """
-    v1: (a, p)
-    v2: (b, p)
-    return: dist: (a, b), where dist[i,j] = l2_dist(m1[i], m2[j])
-    """
-    a = v1.size(0)
-    b = v2.size(0)
-    v1 = torch.stack([v1]*b).transpose(0,1)
-    v2 = torch.stack([v2]*a)
-    return torch.sum((v1-v2)**2, 2).squeeze()
+        grad_input = grad_output.clone()
+        grad_emb = torch.mm(one_hot_ind.t(), grad_output)
+        '''
+        zeros_hot_ind = Variable(torch.zeros(bz, emb_num), requires_grad=False)
+        if torch.cuda.is_available:
+            zeros_hot_ind = zeros_hot_ind.cuda()
+        grad_emb_zeros = torch.mm(zeros_hot_ind, grad_output)
+        '''
+        result, = ctx.saved_variables
+        return grad_input, grad_emb
 
 
 class VQVAE(nn.Module):
     def __init__(self, input_dim, embed_dim, embed_num):
         super(VQVAE, self).__init__()
 
-        self.fc1 = nn.Linear(input_dim, 400)
+        self.fc1 = nn.Linear(784, 400)
         self.fc2 = nn.Linear(400, embed_dim)
         self.fc3 = nn.Linear(embed_dim, 400)
-        self.fc4 = nn.Linear(400, input_dim)
+        self.fc4 = nn.Linear(400, 784)
+
+        self.vqlayer = VectorQuantization()
 
         self.relu = nn.ReLU()
         self.sigmoid = nn.Sigmoid()
@@ -65,7 +79,7 @@ class VQVAE(nn.Module):
         return z_e 
 
     def vq(self, z_e):
-        z_q = VectorQuantization.apply(z_e, self.embed.weight) 
+        z_q = self.vqlayer.apply(z_e, self.embed.weight) 
         return z_q
 
     def decode(self, z_q):
@@ -73,7 +87,7 @@ class VQVAE(nn.Module):
         return self.sigmoid(self.fc4(h3))
 
     def forward(self, x):
-        self.z_e = self.encode(x)
+        self.z_e = self.encode(x.view(-1, 784))
         self.z_q = self.vq(self.z_e)
         self.x_reconst = self.decode(self.z_q)
         return self.x_reconst
@@ -81,3 +95,36 @@ class VQVAE(nn.Module):
     def get_embed_weight(self):
         return self.embed.weight
 
+class VAE(nn.Module):
+    def __init__(self):
+        super(VAE, self).__init__()
+
+        self.fc1 = nn.Linear(784, 400)
+        self.fc21 = nn.Linear(400, 20)
+        self.fc22 = nn.Linear(400, 20)
+        self.fc3 = nn.Linear(20, 400)
+        self.fc4 = nn.Linear(400, 784)
+
+        self.relu = nn.ReLU()
+        self.sigmoid = nn.Sigmoid()
+
+    def encode(self, x):
+        h1 = self.relu(self.fc1(x))
+        return self.fc21(h1), self.fc22(h1)
+
+    def reparameterize(self, mu, logvar):
+        if self.training:
+          std = logvar.mul(0.5).exp_()
+          eps = Variable(std.data.new(std.size()).normal_())
+          return eps.mul(std).add_(mu)
+        else:
+          return mu
+
+    def decode(self, z):
+        h3 = self.relu(self.fc3(z))
+        return self.sigmoid(self.fc4(h3))
+
+    def forward(self, x):
+        mu, logvar = self.encode(x.view(-1, 784))
+        z = self.reparameterize(mu, logvar)
+        return self.decode(z), mu, logvar

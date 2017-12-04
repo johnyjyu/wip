@@ -58,7 +58,8 @@ def get_losses(recon_x, x, model):
     reconst_loss = F.binary_cross_entropy(recon_x, x)
     # embedding loss
     detach_z_e = Variable(model.z_e.data, requires_grad=False)
-    z_q = model.vq(detach_z_e)
+    #z_q = model.vq(detach_z_e)
+    z_q = model.z_q
     embed_loss= torch.sum((detach_z_e - z_q).pow(2))
     embed_loss /= args.batch_size
     # commitment loss
@@ -88,13 +89,19 @@ def train(epoch):
         # clear gradients and run backward
         optimizer.zero_grad()
         # get gradients for decoder and encoder
-        loss = reconst_loss + args.beta * commit_loss
+        loss = reconst_loss# + embed_loss + args.beta * commit_loss
+        #loss = reconst_loss + embed_loss #+ args.beta * commit_loss
+        #loss = reconst_loss + args.beta * commit_loss #+ embed_loss 
+        
         loss.backward()
+        #loss.backward(retain_graph=True)
+
+
         # clear gradients in VQ embedding 
-        model.embed.zero_grad()
+        #model.embed.zero_grad()
         # get gradients for embedding
-        embed_loss.backward()
-        loss += embed_loss
+        #embed_loss.backward()
+        #loss += embed_loss
 
         # run optimizer to update parameters
         optimizer.step()
@@ -120,15 +127,15 @@ def test(epoch):
         recon_batch = model(data)
         reconst_loss, embed_loss, commit_loss = get_losses(recon_batch, data, model)
         test_loss += (reconst_loss + embed_loss + args.beta*commit_loss).data[0]
-        '''
+        
         if i == 0:
           n = min(data.size(0), 8)
-          comparison = torch.cat([data[:n],
+          comparison = torch.cat([data[:n].view(-1,1,28,28),
                                   recon_batch.view(args.batch_size, 1, 28, 28)[:n]])
           save_image(comparison.data.cpu(),
                      'results/reconstruction_' + str(epoch) + '.png', nrow=n)
 
-    '''
+    
     test_loss /= len(test_loader.dataset)
     print('====> Test set loss: {:.4f}'.format(test_loss))
 
@@ -139,10 +146,11 @@ for epoch in range(1, args.epochs + 1):
     test(epoch)
 
     # samples from discrete vectors
-    embed_weight = model.get_embed_weight()
+    sample = model.get_embed_weight()
+    #sample = Variable(torch.randn(10, 500))
     if args.cuda:
        sample = sample.cuda()
-    sample = model.decode(embed_weight).cpu()
+    sample = model.decode(sample).cpu()
     save_image(sample.data.view(args.emb_num, 1, 28, 28),
                'results/sample_' + str(epoch) + '.png')
 
