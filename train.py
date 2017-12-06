@@ -1,4 +1,7 @@
+"""Main pytorch-vqvae training script"""
+
 from __future__ import print_function
+import os
 import argparse
 import torch
 import torch.utils.data
@@ -7,9 +10,10 @@ from torch.autograd import Variable
 from torch.nn import functional as F
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
+from model import VQVAE
 
 
-parser = argparse.ArgumentParser(description='VAE MNIST Example')
+parser = argparse.ArgumentParser(description='VQVAE MNIST Example')
 parser.add_argument('--batch-size', type=int, default=128, metavar='N',
                     help='input batch size for training (default: 128)')
 parser.add_argument('--epochs', type=int, default=10, metavar='N',
@@ -20,6 +24,11 @@ parser.add_argument('--seed', type=int, default=1, metavar='S',
                     help='random seed (default: 1)')
 parser.add_argument('--log-interval', type=int, default=10, metavar='N',
                     help='how many batches to wait before logging training status')
+parser.add_argument('--input-dim', default=784, type=int)
+parser.add_argument('--emb-dim', default=500, type=int)
+parser.add_argument('--emb-num', default=10, type=int)
+parser.add_argument('--beta', default=0.3, type=float)
+
 args = parser.parse_args()
 args.cuda = not args.no_cuda and torch.cuda.is_available()
 
@@ -39,76 +48,58 @@ test_loader = torch.utils.data.DataLoader(
     batch_size=args.batch_size, shuffle=True, **kwargs)
 
 
-class VAE(nn.Module):
-    def __init__(self):
-        super(VAE, self).__init__()
-
-        self.fc1 = nn.Linear(784, 400)
-        self.fc21 = nn.Linear(400, 20)
-        self.fc22 = nn.Linear(400, 20)
-        self.fc3 = nn.Linear(20, 400)
-        self.fc4 = nn.Linear(400, 784)
-
-        self.relu = nn.ReLU()
-        self.sigmoid = nn.Sigmoid()
-
-    def encode(self, x):
-        h1 = self.relu(self.fc1(x))
-        return self.fc21(h1), self.fc22(h1)
-
-    def reparameterize(self, mu, logvar):
-        if self.training:
-          std = logvar.mul(0.5).exp_()
-          eps = Variable(std.data.new(std.size()).normal_())
-          return eps.mul(std).add_(mu)
-        else:
-          return mu
-
-    def decode(self, z):
-        h3 = self.relu(self.fc3(z))
-        return self.sigmoid(self.fc4(h3))
-
-    def forward(self, x):
-        mu, logvar = self.encode(x.view(-1, 784))
-        z = self.reparameterize(mu, logvar)
-        return self.decode(z), mu, logvar
-
-
-model = VAE()
+model = VQVAE(args.input_dim, args.emb_dim, args.emb_num)
 if args.cuda:
     model.cuda()
 
 
-def loss_function(recon_x, x, mu, logvar):
-    BCE = F.binary_cross_entropy(recon_x, x.view(-1, 784))
+def get_losses(recon_x, x, model):
+    # reconstruction loss
+    reconst_loss = F.binary_cross_entropy(recon_x, x)
+    # embedding loss
+    detach_z_e = Variable(model.z_e.data, requires_grad=False)
+    z_q = model.vq(detach_z_e)
+    embed_loss= torch.sum((detach_z_e - z_q).pow(2))
+    embed_loss /= args.batch_size
+    # commitment loss
+    detach_z_q = Variable(model.z_q.data, requires_grad=False)
+    commit_loss = torch.sum((model.z_e - detach_z_q).pow(2))
+    commit_loss /= args.batch_size
 
-    # see Appendix B from VAE paper:
-    # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
-    # https://arxiv.org/abs/1312.6114
-    # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-    KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    # Normalise by same number of elements as in reconstruction
-    KLD /= args.batch_size * 784
-
-    return BCE + KLD
+    return reconst_loss, embed_loss, commit_loss
 
 
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
 
 def train(epoch):
+    """run one epoch of model to train with data loader"""
     model.train()
     train_loss = 0
     for batch_idx, (data, _) in enumerate(train_loader):
-        data = Variable(data)
+        data = Variable(data).view(-1, 784)
         if args.cuda:
             data = data.cuda()
+        # run forward
+        recon_batch = model(data)
+
+        # compute losses
+        reconst_loss, embed_loss, commit_loss = get_losses(recon_batch, data, model)
+        # clear gradients and run backward
         optimizer.zero_grad()
-        recon_batch, mu, logvar = model(data)
-        loss = loss_function(recon_batch, data, mu, logvar)
+        # get gradients for decoder and encoder
+        loss = reconst_loss + args.beta * commit_loss
         loss.backward()
-        train_loss += loss.data[0]
+        # clear gradients in VQ embedding 
+        model.embed.zero_grad()
+        # get gradients for embedding
+        embed_loss.backward()
+        loss += embed_loss
+
+        # run optimizer to update parameters
         optimizer.step()
+        train_loss += loss.data[0]
+
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
@@ -125,9 +116,11 @@ def test(epoch):
     for i, (data, _) in enumerate(test_loader):
         if args.cuda:
             data = data.cuda()
-        data = Variable(data, volatile=True)
-        recon_batch, mu, logvar = model(data)
-        test_loss += loss_function(recon_batch, data, mu, logvar).data[0]
+        data = Variable(data, volatile=True).view(-1, 784)
+        recon_batch = model(data)
+        reconst_loss, embed_loss, commit_loss = get_losses(recon_batch, data, model)
+        test_loss += (reconst_loss + embed_loss + args.beta*commit_loss).data[0]
+        '''
         if i == 0:
           n = min(data.size(0), 8)
           comparison = torch.cat([data[:n],
@@ -135,16 +128,21 @@ def test(epoch):
           save_image(comparison.data.cpu(),
                      'results/reconstruction_' + str(epoch) + '.png', nrow=n)
 
+    '''
     test_loss /= len(test_loader.dataset)
     print('====> Test set loss: {:.4f}'.format(test_loss))
 
 
+os.makedirs('results', exist_ok=True)
 for epoch in range(1, args.epochs + 1):
     train(epoch)
     test(epoch)
-    sample = Variable(torch.randn(64, 20))
+
+    # samples from discrete vectors
+    embed_weight = model.get_embed_weight()
     if args.cuda:
        sample = sample.cuda()
-    sample = model.decode(sample).cpu()
-    save_image(sample.data.view(64, 1, 28, 28),
+    sample = model.decode(embed_weight).cpu()
+    save_image(sample.data.view(args.emb_num, 1, 28, 28),
                'results/sample_' + str(epoch) + '.png')
+
