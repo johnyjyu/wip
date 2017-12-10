@@ -2,6 +2,7 @@
 
 from __future__ import print_function
 import os
+import sys
 import argparse
 import torch
 import torch.utils.data
@@ -70,16 +71,28 @@ def train(epoch):
         # clear gradients and run backward
         optimizer.zero_grad()
         # get gradients for decoder and encoder
-        loss = reconst_loss# + embed_loss + args.beta * commit_loss
-        #loss = reconst_loss + embed_loss #+ args.beta * commit_loss
-        #loss = reconst_loss + args.beta * commit_loss #+ embed_loss 
+        #loss = reconst_loss
+        #loss = embed_loss
+        #loss = commit_loss
+        loss = reconst_loss + embed_loss + args.beta * commit_loss
+        #loss = reconst_loss + args.beta * commit_loss
+        #loss = reconst_loss# + embed_loss + args.beta * commit_loss
+        #loss = reconst_loss + embed_loss# + args.beta * commit_loss 
         
-        loss.backward()
-        #loss.backward(retain_graph=True)
+        # backward for decoder and embedding
+        #loss.backward()
+        loss.backward(retain_graph=True)
 
+        # backward for encoder
+        #model.embed.zero_grad()
+        #model.fc1.zero_grad()
+        #model.fc2.zero_grad()
+        #model.fc3.zero_grad()
+        #model.fc4.zero_grad()
+        #model.z_q.zero_grad()
+        model.bwd()
 
         # clear gradients in VQ embedding 
-        #model.embed.zero_grad()
         # get gradients for embedding
         #embed_loss.backward()
         #loss += embed_loss
