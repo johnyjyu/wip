@@ -1,6 +1,5 @@
 # generative_best_papers
 We will compare several generative methods in recent papers. 
-Implementations are in PyTorch.
 
 Please feel free to add any tasks here (breaking down to small subtasks helps): 
 ToDo
